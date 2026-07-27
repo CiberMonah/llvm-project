@@ -547,10 +547,13 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
 
   if (Args.hasFlag(options::OPT_finsert_def_use,
                    options::OPT_fno_insert_def_use, false)) {
-    std::string DefUseRuntimePath =
-        (llvm::Twine(llvm::sys::path::parent_path(D.Dir)) + "/" +
-         CLANG_INSTALL_LIBDIR_BASENAME + "/libDefUseRuntime.a")
-            .str();
+    llvm::SmallString<128> DefUseRuntimePath(
+    llvm::sys::path::parent_path(D.Dir));
+
+    llvm::sys::path::append(
+        DefUseRuntimePath,
+        CLANG_INSTALL_LIBDIR_BASENAME,
+        "libDefUseRuntime.a");
 
     CmdArgs.push_back(Args.MakeArgString(DefUseRuntimePath));
   }

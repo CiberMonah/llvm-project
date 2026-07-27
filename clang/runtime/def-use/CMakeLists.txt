@@ -5,7 +5,6 @@ add_library(DefUseRuntime STATIC
 set_target_properties(DefUseRuntime PROPERTIES
   OUTPUT_NAME DefUseRuntime
   ARCHIVE_OUTPUT_DIRECTORY "${LLVM_LIBRARY_OUTPUT_INTDIR}"
-  POSITION_INDEPENDENT_CODE ON
   FOLDER "Clang/Runtime"
 )
 
