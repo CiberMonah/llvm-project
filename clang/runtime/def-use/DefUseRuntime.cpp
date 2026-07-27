@@ -3,7 +3,10 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <string>
 #include <utility>
+#include <unistd.h>
+
 
 namespace {
 
@@ -18,6 +21,7 @@ std::map<std::pair<uint64_t, uint64_t>, uint64_t>
 std::map<std::pair<uint64_t, uint64_t>, uint64_t>
     LastStoreEvent;
 
+
 class TraceOutput {
 public:
   static TraceOutput &instance() {
@@ -26,9 +30,6 @@ public:
   }
 
   std::ostream &stream() {
-    if (!File.is_open())
-      return std::cerr;
-
     return File;
   }
 
@@ -37,8 +38,16 @@ public:
 
 private:
   TraceOutput() {
-    const char *Path = std::getenv("DEF_USE_TRACE");
-    File.open(Path ? Path : "defuse.trace");
+    std::string Path =
+        "defuse." + std::to_string(getpid()) + ".trace";
+
+    File.open(Path);
+
+    if (!File) {
+      std::cerr << "Failed to open def-use trace file: "
+                << Path << '\n';
+      std::abort();
+    }
   }
 
   std::ofstream File;
