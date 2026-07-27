@@ -32,8 +32,14 @@ DefUseInstrumentationPass::run(Module &M, ModuleAnalysisManager &) {
 
     LLVMContext& Ctx = M.getContext();
     IRBuilder<> Builder(Ctx);
-    DenseMap<Instruction*, uint64_t> InstIDs;           // Мапа, для того чтоб повторный вызов инструкции вспоминался и айдишник ёё брался
-    SmallVector<Instruction *> Instructions;            // Чтоб модуль заново не обходить, а по вектору пробежаться
+
+    // Collects instructions before modifying the IR
+    // InstIDs stores a module-local static ID for each instruction
+    // SmallVector<Instruction *> Instructions allows to iterate on vector of all instructions 
+    // and prevents inserted callbacks from being instrumented.
+
+    DenseMap<Instruction *, uint64_t> InstIDs;
+    SmallVector<Instruction *> Instructions;
 
     FunctionType *HookType = FunctionType::get(Type::getVoidTy(Ctx),{Type::getInt64Ty(Ctx), Type::getInt64Ty(Ctx)}, false);
     FunctionCallee Hook_inst =  M.getOrInsertFunction("__def_use_trace_inst", HookType);
@@ -99,11 +105,7 @@ DefUseInstrumentationPass::run(Module &M, ModuleAnalysisManager &) {
         Value *Address =
             Builder.CreatePtrToInt(PointerOperand, Type::getInt64Ty(Ctx));
 
-        // errs() << "LOAD address value: " << *Address << '\n';
-
         TypeSize LoadSize = DL.getTypeStoreSize(LI->getType());
-
-        // errs() << "Load size: " << LoadSize.getFixedValue() << '\n';
 
         uint64_t Size = LoadSize.getFixedValue();
 
@@ -115,13 +117,8 @@ DefUseInstrumentationPass::run(Module &M, ModuleAnalysisManager &) {
         Value *Address =
             Builder.CreatePtrToInt(PointerOperand, Type::getInt64Ty(Ctx));
 
-        // errs() << "Store address value: " << *Address << '\n';
-
         Type *StoredType = SI->getValueOperand()->getType();
         TypeSize StoreSize = DL.getTypeStoreSize(StoredType);
-
-        // errs() << "Store size: " << StoreSize.getFixedValue() << '\n';
-
 
         uint64_t Size = StoreSize.getFixedValue();
 
@@ -145,9 +142,6 @@ DefUseInstrumentationPass::run(Module &M, ModuleAnalysisManager &) {
         uint64_t DefID = InstIDs.lookup(Def);
 
         Builder.CreateCall(Hook_use,  {ModuleToken, Builder.getInt64(DefID)});
-
-        // errs()  <<    "DEF " << DefID <<
-        //              "-> USE " << UseID << "\n";
       }
     }
 
