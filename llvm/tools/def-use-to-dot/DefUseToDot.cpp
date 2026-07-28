@@ -1,11 +1,18 @@
+#include "llvm/Support/CommandLine.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/InitLLVM.h"
+#include "llvm/Support/raw_ostream.h"
+
 #include <cstdint>
 #include <fstream>
-#include <iostream>
 #include <map>
 #include <optional>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <vector>
+
+namespace {
 
 struct Event {
   uint64_t ID;
@@ -20,13 +27,23 @@ struct Edge {
   bool IsMemory;
 };
 
-static std::string escapeDotString(const std::string &Text) {
+llvm::cl::opt<std::string> InputPath(
+    llvm::cl::Positional,
+    llvm::cl::desc("<trace file>"),
+    llvm::cl::Required);
+
+llvm::cl::opt<std::string> OutputPath(
+    "o",
+    llvm::cl::desc("Output DOT file"),
+    llvm::cl::value_desc("filename"),
+    llvm::cl::init("graph.dot"));
+
+std::string escapeDotString(const std::string &Text) {
   std::string Result;
 
   for (char C : Text) {
-    if (C == '\\' || C == '"') {
+    if (C == '"')
       Result += '\\';
-    }
 
     Result += C;
   }
@@ -34,44 +51,15 @@ static std::string escapeDotString(const std::string &Text) {
   return Result;
 }
 
-int main(int argc, char **argv) {
-  if (argc != 2 && argc != 4) {
-    std::cerr
-        << "Usage: " << argv[0]
-        << " <trace-file> [-o <dot-file>]\n";
-    return 1;
-  }
-
-  std::string InputPath = argv[1];
-  std::string OutputPath = "graph.dot";
-
-  if (argc == 4) {
-    if (std::string(argv[2]) != "-o") {
-      std::cerr << "Expected -o before output filename\n";
-      return 1;
-    }
-
-    OutputPath = argv[3];
-  }
-
-  std::ifstream Input(InputPath);
-
-  if (!Input.is_open()) {
-    std::cerr << "Could not open input file: "
-              << InputPath << '\n';
-    return 1;
-  }
-
-  std::map<uint64_t, Event> Events;
-  std::vector<Edge> Edges;
+bool parseTrace(std::istream &Input,
+                std::map<uint64_t, Event> &Events,
+                std::vector<Edge> &Edges) {
   std::optional<uint64_t> CurrentEventID;
-
   std::string Line;
 
   while (std::getline(Input, Line)) {
-    if (Line.empty()) {
+    if (Line.empty())
       continue;
-    }
 
     std::istringstream LineStream(Line);
     std::string RecordType;
@@ -90,87 +78,89 @@ int main(int argc, char **argv) {
                        >> Module
                        >> InstWord
                        >> InstID)) {
-        std::cerr << "Invalid EVENT line: "
-                  << Line << '\n';
-        return 1;
+        llvm::errs() << "error: invalid EVENT line: "
+                     << Line << '\n';
+        return false;
       }
 
-      if (ModuleWord != "MODULE" ||
-          InstWord != "INST") {
-        std::cerr << "Invalid EVENT format: "
-                  << Line << '\n';
-        return 1;
+      if (ModuleWord != "MODULE" || InstWord != "INST") {
+        llvm::errs() << "error: invalid EVENT format: "
+                     << Line << '\n';
+        return false;
       }
 
       Events[EventID] =
           Event{EventID, Module, InstID, {}};
 
       CurrentEventID = EventID;
+      continue;
+    }
 
-    } else if (RecordType == "EDGE" ||
-               RecordType == "MEM_EDGE") {
+    if (RecordType == "EDGE" ||
+        RecordType == "MEM_EDGE") {
       uint64_t From;
       uint64_t To;
       std::string Arrow;
 
       if (!(LineStream >> From >> Arrow >> To) ||
           Arrow != "->") {
-        std::cerr << "Invalid edge line: "
-                  << Line << '\n';
-        return 1;
+        llvm::errs() << "error: invalid edge line: "
+                     << Line << '\n';
+        return false;
       }
 
       Edges.push_back(
           Edge{From, To, RecordType == "MEM_EDGE"});
 
-    } else if (RecordType == "STORE" ||
-               RecordType == "LOAD") {
+      continue;
+    }
+
+    if (RecordType == "STORE" ||
+        RecordType == "LOAD") {
       std::string Address;
       uint64_t Size;
 
       if (!(LineStream >> Address >> Size)) {
-        std::cerr << "Invalid memory line: "
-                  << Line << '\n';
-        return 1;
+        llvm::errs() << "error: invalid memory line: "
+                     << Line << '\n';
+        return false;
       }
 
       if (!CurrentEventID.has_value()) {
-        std::cerr
-            << "Memory operation without preceding EVENT: "
+        llvm::errs()
+            << "error: memory operation without preceding EVENT: "
             << Line << '\n';
-        return 1;
+        return false;
       }
 
       auto EventIt = Events.find(*CurrentEventID);
 
       if (EventIt == Events.end()) {
-        std::cerr << "Current event was not found\n";
-        return 1;
+        llvm::errs() << "error: current event was not found\n";
+        return false;
       }
 
       std::ostringstream Detail;
 
       Detail << RecordType
-             << " " << Address
+             << ' ' << Address
              << " size=" << Size;
 
       EventIt->second.Details.push_back(Detail.str());
-
-    } else {
-      std::cerr << "Unknown trace record: "
-                << Line << '\n';
-      return 1;
+      continue;
     }
+
+    llvm::errs() << "error: unknown trace record: "
+                 << Line << '\n';
+    return false;
   }
 
-  std::ofstream Output(OutputPath);
+  return true;
+}
 
-  if (!Output.is_open()) {
-    std::cerr << "Could not open output file: "
-              << OutputPath << '\n';
-    return 1;
-  }
-
+void writeDot(llvm::raw_ostream &Output,
+              const std::map<uint64_t, Event> &Events,
+              const std::vector<Edge> &Edges) {
   Output << "digraph DefUse {\n";
   Output << "  rankdir=TB;\n";
   Output << "  node [shape=box, fontname=\"monospace\"];\n";
@@ -183,9 +173,8 @@ int main(int argc, char **argv) {
           << "\\nModule " << EventData.Module
           << "\\nInst " << EventData.InstID;
 
-    for (const std::string &Detail : EventData.Details) {
+    for (const std::string &Detail : EventData.Details)
       Label << "\\n" << Detail;
-    }
 
     Output << "  n" << EventID
            << " [label=\""
@@ -197,20 +186,63 @@ int main(int argc, char **argv) {
 
   for (const Edge &GraphEdge : Edges) {
     Output << "  n" << GraphEdge.From
-          << " -> n" << GraphEdge.To;
+           << " -> n" << GraphEdge.To;
 
-    if (GraphEdge.IsMemory) {
+    if (GraphEdge.IsMemory)
       Output << " [label=\"memory\", style=dashed]";
-    }
 
     Output << ";\n";
   }
 
   Output << "}\n";
+}
 
-  std::cout << "Wrote " << Events.size()
-            << " nodes and " << Edges.size()
-            << " edges to " << OutputPath << '\n';
+} // namespace
+
+int main(int argc, char **argv) {
+  llvm::InitLLVM InitLLVM(argc, argv);
+
+  llvm::cl::ParseCommandLineOptions(
+      argc, argv,
+      "Convert a dynamic def-use trace to DOT\n");
+
+  std::ifstream Input(InputPath.getValue());
+
+  if (!Input) {
+    llvm::errs() << "error: cannot open input file '"
+                 << InputPath.getValue() << "'\n";
+    return 1;
+  }
+
+  std::map<uint64_t, Event> Events;
+  std::vector<Edge> Edges;
+
+  if (!parseTrace(Input, Events, Edges))
+    return 1;
+
+  std::error_code EC;
+
+  llvm::raw_fd_ostream Output(
+      OutputPath.getValue(),
+      EC,
+      llvm::sys::fs::CD_CreateNew);
+
+  if (EC) {
+    llvm::errs() << "error: cannot create output file '"
+                 << OutputPath.getValue()
+                 << "': " << EC.message() << '\n';
+    return 1;
+  }
+
+  writeDot(Output, Events, Edges);
+
+  llvm::outs() << "Wrote "
+               << Events.size()
+               << " nodes and "
+               << Edges.size()
+               << " edges to "
+               << OutputPath.getValue()
+               << '\n';
 
   return 0;
 }
