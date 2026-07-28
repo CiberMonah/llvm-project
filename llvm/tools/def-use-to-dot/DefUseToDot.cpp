@@ -1,3 +1,5 @@
+#include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/StringSwitch.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/InitLLVM.h"
@@ -13,6 +15,15 @@
 #include <vector>
 
 namespace {
+
+enum class RecordKind {
+  Event,
+  Edge,
+  MemoryEdge,
+  Store,
+  Load,
+  Unknown
+};
 
 struct Event {
   uint64_t ID;
@@ -38,6 +49,16 @@ llvm::cl::opt<std::string> OutputPath(
     llvm::cl::value_desc("filename"),
     llvm::cl::init("graph.dot"));
 
+RecordKind parseRecordKind(llvm::StringRef Name) {
+  return llvm::StringSwitch<RecordKind>(Name)
+      .Case("EVENT", RecordKind::Event)
+      .Case("EDGE", RecordKind::Edge)
+      .Case("MEM_EDGE", RecordKind::MemoryEdge)
+      .Case("STORE", RecordKind::Store)
+      .Case("LOAD", RecordKind::Load)
+      .Default(RecordKind::Unknown);
+}
+
 std::string escapeDotString(const std::string &Text) {
   std::string Result;
 
@@ -51,6 +72,99 @@ std::string escapeDotString(const std::string &Text) {
   return Result;
 }
 
+bool parseEventRecord(std::istringstream &LineStream,
+                      const std::string &Line,
+                      std::map<uint64_t, Event> &Events,
+                      std::optional<uint64_t> &CurrentEventID) {
+  uint64_t EventID;
+  uint64_t InstID;
+  std::string ModuleKeyword;
+  std::string Module;
+  std::string InstKeyword;
+
+  if (!(LineStream >> EventID
+                   >> ModuleKeyword
+                   >> Module
+                   >> InstKeyword
+                   >> InstID)) {
+    llvm::errs() << "error: invalid EVENT line: "
+                 << Line << '\n';
+    return false;
+  }
+
+  if (ModuleKeyword != "MODULE" || InstKeyword != "INST") {
+    llvm::errs() << "error: invalid EVENT format: "
+                 << Line << '\n';
+    return false;
+  }
+
+  Events[EventID] = Event{EventID, Module, InstID, {}};
+  CurrentEventID = EventID;
+
+  return true;
+}
+
+bool parseEdgeRecord(std::istringstream &LineStream,
+                     const std::string &Line,
+                     RecordKind Kind,
+                     std::vector<Edge> &Edges) {
+  uint64_t From;
+  uint64_t To;
+  std::string Arrow;
+
+  if (!(LineStream >> From >> Arrow >> To) || Arrow != "->") {
+    llvm::errs() << "error: invalid edge line: "
+                 << Line << '\n';
+    return false;
+  }
+
+  Edges.push_back(
+      Edge{From, To, Kind == RecordKind::MemoryEdge});
+
+  return true;
+}
+
+bool parseMemoryRecord(std::istringstream &LineStream,
+                       const std::string &Line,
+                       RecordKind Kind,
+                       const std::optional<uint64_t> &CurrentEventID,
+                       std::map<uint64_t, Event> &Events) {
+  std::string Address;
+  uint64_t Size;
+
+  if (!(LineStream >> Address >> Size)) {
+    llvm::errs() << "error: invalid memory line: "
+                 << Line << '\n';
+    return false;
+  }
+
+  if (!CurrentEventID.has_value()) {
+    llvm::errs()
+        << "error: memory operation without preceding EVENT: "
+        << Line << '\n';
+    return false;
+  }
+
+  auto EventIt = Events.find(*CurrentEventID);
+
+  if (EventIt == Events.end()) {
+    llvm::errs() << "error: current event was not found\n";
+    return false;
+  }
+
+  llvm::StringRef Operation =
+      Kind == RecordKind::Store ? "STORE" : "LOAD";
+
+  std::ostringstream Detail;
+  Detail << Operation.str()
+         << ' ' << Address
+         << " size=" << Size;
+
+  EventIt->second.Details.push_back(Detail.str());
+
+  return true;
+}
+
 bool parseTrace(std::istream &Input,
                 std::map<uint64_t, Event> &Events,
                 std::vector<Edge> &Edges) {
@@ -62,97 +176,37 @@ bool parseTrace(std::istream &Input,
       continue;
 
     std::istringstream LineStream(Line);
-    std::string RecordType;
+    std::string RecordName;
 
-    LineStream >> RecordType;
+    LineStream >> RecordName;
 
-    if (RecordType == "EVENT") {
-      uint64_t EventID;
-      uint64_t InstID;
-      std::string ModuleWord;
-      std::string Module;
-      std::string InstWord;
+    RecordKind Kind = parseRecordKind(RecordName);
 
-      if (!(LineStream >> EventID
-                       >> ModuleWord
-                       >> Module
-                       >> InstWord
-                       >> InstID)) {
-        llvm::errs() << "error: invalid EVENT line: "
-                     << Line << '\n';
+    switch (Kind) {
+    case RecordKind::Event:
+      if (!parseEventRecord(
+              LineStream, Line, Events, CurrentEventID))
         return false;
-      }
+      break;
 
-      if (ModuleWord != "MODULE" || InstWord != "INST") {
-        llvm::errs() << "error: invalid EVENT format: "
-                     << Line << '\n';
+    case RecordKind::Edge:
+    case RecordKind::MemoryEdge:
+      if (!parseEdgeRecord(LineStream, Line, Kind, Edges))
         return false;
-      }
+      break;
 
-      Events[EventID] =
-          Event{EventID, Module, InstID, {}};
+    case RecordKind::Store:
+    case RecordKind::Load:
+      if (!parseMemoryRecord(
+              LineStream, Line, Kind, CurrentEventID, Events))
+        return false;
+      break;
 
-      CurrentEventID = EventID;
-      continue;
+    case RecordKind::Unknown:
+      llvm::errs() << "error: unknown trace record: "
+                   << Line << '\n';
+      return false;
     }
-
-    if (RecordType == "EDGE" ||
-        RecordType == "MEM_EDGE") {
-      uint64_t From;
-      uint64_t To;
-      std::string Arrow;
-
-      if (!(LineStream >> From >> Arrow >> To) ||
-          Arrow != "->") {
-        llvm::errs() << "error: invalid edge line: "
-                     << Line << '\n';
-        return false;
-      }
-
-      Edges.push_back(
-          Edge{From, To, RecordType == "MEM_EDGE"});
-
-      continue;
-    }
-
-    if (RecordType == "STORE" ||
-        RecordType == "LOAD") {
-      std::string Address;
-      uint64_t Size;
-
-      if (!(LineStream >> Address >> Size)) {
-        llvm::errs() << "error: invalid memory line: "
-                     << Line << '\n';
-        return false;
-      }
-
-      if (!CurrentEventID.has_value()) {
-        llvm::errs()
-            << "error: memory operation without preceding EVENT: "
-            << Line << '\n';
-        return false;
-      }
-
-      auto EventIt = Events.find(*CurrentEventID);
-
-      if (EventIt == Events.end()) {
-        llvm::errs() << "error: current event was not found\n";
-        return false;
-      }
-
-      std::ostringstream Detail;
-
-      Detail << RecordType
-             << ' ' << Address
-             << " size=" << Size;
-
-      EventIt->second.Details.push_back(Detail.str());
-      continue;
-    }
-
-    llvm::errs() << "error: unknown trace record: "
-                 << Line << '\n';
-    return false;
   }
 
   return true;
@@ -221,7 +275,6 @@ int main(int argc, char **argv) {
     return 1;
 
   std::error_code EC;
-
   llvm::raw_fd_ostream Output(
       OutputPath.getValue(),
       EC,
