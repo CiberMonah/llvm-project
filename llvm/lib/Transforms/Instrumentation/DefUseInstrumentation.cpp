@@ -1,6 +1,7 @@
 #include "llvm/Transforms/Instrumentation/DefUseInstrumentation.h"
 
 #include "llvm/ADT/StringRef.h"
+
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constant.h"
 #include "llvm/IR/Constants.h"
@@ -26,6 +27,20 @@
 #include <cstdint>
 
 namespace llvm {
+
+namespace {
+
+bool shouldSkipFunction(const Function &F) {
+  StringRef Name = F.getName();
+
+  // Global initialization functions may execute before the def-use runtime
+  // state is initialized, so tracing hooks must not be inserted into them.
+  return Name.starts_with("__cxx_global_var_init") ||
+         Name.starts_with("_GLOBAL__sub_I_");
+}
+
+} // namespace
+
 
 PreservedAnalyses
 DefUseInstrumentationPass::run(Module &M, ModuleAnalysisManager &) {
@@ -81,17 +96,10 @@ DefUseInstrumentationPass::run(Module &M, ModuleAnalysisManager &) {
     uint64_t CallID = 0;
 
     for (Function &F : M) {
-      if (F.isDeclaration()) {
-        continue;
-      } 
-      
-      StringRef Name = F.getName();
-
-      if (Name.starts_with("__cxx_global_var_init") ||
-          Name.starts_with("_GLOBAL__sub_I_")) {
+      if (F.isDeclaration() || shouldSkipFunction(F)) {
         continue;
       }
-
+      
       for (BasicBlock &BB : F) {
         for (Instruction &I : BB) {
           Instructions.push_back(&I);
