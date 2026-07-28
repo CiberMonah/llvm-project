@@ -10,18 +10,6 @@
 
 namespace {
 
-uint64_t NextEventID = 0;
-uint64_t CurrentEventID = 0;
-
-// Maps a static instruction identified by (ModuleToken, InstID) to its latest dynamic event
-std::map<MemoryRange, uint64_t>
-    LastEventByInstruction;
-
-// Maps a memory range identified by (Address, Size) to the event ID of its latest store
-std::map<MemoryRange, uint64_t>
-    LastStoreEvent;
-
-
 struct MemoryRange {
   uint64_t Address;
   uint64_t Size;
@@ -31,6 +19,17 @@ struct MemoryRange {
            (Address == Other.Address && Size < Other.Size);
   }
 };
+
+uint64_t NextEventID = 0;
+uint64_t CurrentEventID = 0;
+
+// Maps a static instruction identified by (ModuleToken, InstID) to its latest
+// dynamic event.
+std::map<std::pair<uint64_t, uint64_t>, uint64_t>
+    LastEventByInstruction;
+
+// Maps a memory range to the event ID of its latest store.
+std::map<MemoryRange, uint64_t> LastStoreEvent;
 
 class TraceOutput {
 public:
@@ -115,7 +114,7 @@ extern "C" void __def_use_trace_store(uint64_t Address,
 
   MemoryRange Range{Address, Size};
 
-  LastStoreEvent[MemoryRange] = CurrentEventID;
+  LastStoreEvent[Range] = CurrentEventID;
 }
 
 extern "C" void __def_use_trace_load(uint64_t Address,
@@ -130,7 +129,7 @@ extern "C" void __def_use_trace_load(uint64_t Address,
 
   MemoryRange Range{Address, Size};
 
-  auto It = LastStoreEvent.find(MemoryRange);
+  auto It = LastStoreEvent.find(Range);
 
   if (It == LastStoreEvent.end())
     return;

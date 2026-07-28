@@ -56,9 +56,9 @@ DefUseInstrumentationPass::run(Module &M, ModuleAnalysisManager &) {
     DenseMap<Instruction *, uint64_t> InstIDs;
     SmallVector<Instruction *> Instructions;
 
-    FunctionType *HookType = FunctionType::get(Type::getVoidTy(Ctx),{Type::getInt64Ty(Ctx), Type::getInt64Ty(Ctx)}, false);
-    FunctionCallee Hook_inst =  M.getOrInsertFunction("__def_use_trace_inst", HookType);
-    FunctionCallee Hook_use =  M.getOrInsertFunction("__def_use_trace_ssa_use", HookType);
+    FunctionType *TraceHookType = FunctionType::get(Type::getVoidTy(Ctx),{Type::getInt64Ty(Ctx), Type::getInt64Ty(Ctx)}, false);
+    FunctionCallee InstHook =  M.getOrInsertFunction("__def_use_trace_inst", TraceHookType);
+    FunctionCallee SSAUseHook =  M.getOrInsertFunction("__def_use_trace_ssa_use", TraceHookType);
 
     FunctionType *MemoryHookType = FunctionType::get(Type::getVoidTy(Ctx),{Type::getInt64Ty(Ctx), Type::getInt64Ty(Ctx)},false);
     FunctionCallee HookLoad = M.getOrInsertFunction("__def_use_trace_load", MemoryHookType);
@@ -103,8 +103,7 @@ DefUseInstrumentationPass::run(Module &M, ModuleAnalysisManager &) {
       for (BasicBlock &BB : F) {
         for (Instruction &I : BB) {
           Instructions.push_back(&I);
-          InstIDs[&I] = CallID;
-          CallID++;
+          InstIDs[&I] = CallID++;
         }
       }
     }
@@ -116,7 +115,7 @@ DefUseInstrumentationPass::run(Module &M, ModuleAnalysisManager &) {
       }
       uint64_t UseID = InstIDs.lookup(I);
       Builder.SetInsertPoint(I);
-      Builder.CreateCall(Hook_inst,  {ModuleToken,Builder.getInt64(UseID)});
+      Builder.CreateCall(InstHook,  {ModuleToken,Builder.getInt64(UseID)});
 
       // Handle load and store instructions separately
       if (auto *LI = dyn_cast<LoadInst>(I)) {
@@ -147,7 +146,7 @@ DefUseInstrumentationPass::run(Module &M, ModuleAnalysisManager &) {
 
         uint64_t DefID = InstIDs.lookup(Def);
 
-        Builder.CreateCall(Hook_use,  {ModuleToken, Builder.getInt64(DefID)});
+        Builder.CreateCall(SSAUseHook,  {ModuleToken, Builder.getInt64(DefID)});
       }
     }
 
