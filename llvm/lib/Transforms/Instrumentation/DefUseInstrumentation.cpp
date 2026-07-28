@@ -49,7 +49,19 @@ DefUseInstrumentationPass::run(Module &M, ModuleAnalysisManager &) {
     FunctionCallee HookLoad = M.getOrInsertFunction("__def_use_trace_load", MemoryHookType);
     FunctionCallee HookStore = M.getOrInsertFunction("__def_use_trace_store", MemoryHookType);
 
-    const DataLayout &DL = M.getDataLayout(); // DataLayout::getTypeStoreSize()  чтоб получить размер значения в памяти
+    // Used to determine memory access sizes
+    const DataLayout &DL = M.getDataLayout();
+
+    auto InstrumentMemoryAccess =
+    [&](Value *PointerOperand, Type *AccessType, FunctionCallee Hook) {
+      Value *Address = Builder.CreatePtrToInt(
+          PointerOperand, Type::getInt64Ty(Ctx));
+
+      TypeSize AccessSize = DL.getTypeStoreSize(AccessType);
+      uint64_t Size = AccessSize.getFixedValue();
+
+      Builder.CreateCall(Hook, {Address, Builder.getInt64(Size)});
+    };
 
     GlobalVariable *ModuleTokenGV = M.getGlobalVariable("__def_use_module_token", true);
 
@@ -65,7 +77,7 @@ DefUseInstrumentationPass::run(Module &M, ModuleAnalysisManager &) {
 
     Constant *ModuleToken = ConstantExpr::getPtrToInt(ModuleTokenGV,Type::getInt64Ty(Ctx));
 
-    // первый обход заполняет мапу инструкция - ID
+    // first loop populates the map: instruction – ID.
     uint64_t CallID = 0;
 
     for (Function &F : M) {
@@ -88,45 +100,31 @@ DefUseInstrumentationPass::run(Module &M, ModuleAnalysisManager &) {
         }
       }
     }
-    // второй обход создает зависимости, на основе мапы, использует ли функция результат уже другой инструкции
+    // The second loop creates dependencies based on the map, determining whether a function uses the result of another instruction
 
     for (Instruction *I : Instructions) {
-      if (isa<PHINode>(I)) {    //phi функции скипаем, реализации нет
+      if (isa<PHINode>(I)) {    // skip phi function
         continue;
       }
       uint64_t UseID = InstIDs.lookup(I);
       Builder.SetInsertPoint(I);
       Builder.CreateCall(Hook_inst,  {ModuleToken,Builder.getInt64(UseID)});
 
-      // Load и Store отельно обрабатываем
+      // Handle load and store instructions separately
       if (auto *LI = dyn_cast<LoadInst>(I)) {
-        Value *PointerOperand = LI->getPointerOperand();
-
-        Value *Address =
-            Builder.CreatePtrToInt(PointerOperand, Type::getInt64Ty(Ctx));
-
-        TypeSize LoadSize = DL.getTypeStoreSize(LI->getType());
-
-        uint64_t Size = LoadSize.getFixedValue();
-
-        Builder.CreateCall(HookLoad, {  Address, Builder.getInt64(Size)});
-
+        InstrumentMemoryAccess(
+            LI->getPointerOperand(),
+            LI->getType(),
+            HookLoad);
       } else if (auto *SI = dyn_cast<StoreInst>(I)) {
-        Value *PointerOperand = SI->getPointerOperand();
-
-        Value *Address =
-            Builder.CreatePtrToInt(PointerOperand, Type::getInt64Ty(Ctx));
-
-        Type *StoredType = SI->getValueOperand()->getType();
-        TypeSize StoreSize = DL.getTypeStoreSize(StoredType);
-
-        uint64_t Size = StoreSize.getFixedValue();
-
-        Builder.CreateCall(HookStore, { Address, Builder.getInt64(Size)});
+        InstrumentMemoryAccess(
+            SI->getPointerOperand(),
+            SI->getValueOperand()->getType(),
+            HookStore);
       }
 
 
-      // проверка операнда, что это именно mul/plus и др, и установление связи def - use
+      // Oprand chech, if it mul/plus or etc, and setting dependence def - use
       for (Use &Operand : I->operands()) {
         Value *V = Operand.get();
 
