@@ -545,6 +545,19 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
   addLinkerCompressDebugSectionsOption(ToolChain, Args, CmdArgs);
   AddLinkerInputs(ToolChain, Inputs, Args, CmdArgs, JA);
 
+  if (Args.hasFlag(options::OPT_finsert_def_use,
+                   options::OPT_fno_insert_def_use, false)) {
+    llvm::SmallString<128> DefUseRuntimePath(
+    llvm::sys::path::parent_path(D.Dir));
+
+    llvm::sys::path::append(
+        DefUseRuntimePath,
+        CLANG_INSTALL_LIBDIR_BASENAME,
+        "libDefUseRuntime.a");
+
+    CmdArgs.push_back(Args.MakeArgString(DefUseRuntimePath));
+  }
+
   addHIPRuntimeLibArgs(ToolChain, C, Args, CmdArgs);
 
   // The profile runtime also needs access to system libraries.
